@@ -1,0 +1,23 @@
+---
+config:
+  layout: elk
+---
+stateDiagram
+  direction TB
+  [*] --> INIT
+  INIT --> IDLE:Inicialização completa
+  IDLE --> MONITORING:timer1()
+  IDLE --> IDLE
+  MONITORING --> MONITORING
+  MONITORING --> PROCESSING_COMMAND:Comando MQTT recebido
+  PROCESSING_COMMAND --> ACTUATING:Comando processado
+  PROCESSING_COMMAND --> ERROR:Falha no processamento
+  ACTUATING --> MONITORING:Ação concluída
+  ACTUATING --> TIMEOUT:Deadline excedido
+  TIMEOUT --> RECOVERY:Tentando recuperar
+  TIMEOUT --> ERROR:Falha crítica
+  ERROR --> RECOVERY:Iniciando recuperação
+  RECOVERY --> IDLE:Sistema restaurado
+  RECOVERY --> ERROR:Falha na recuperação
+  ERROR --> [*]
+  IDLE --> [*]:Desligamento
