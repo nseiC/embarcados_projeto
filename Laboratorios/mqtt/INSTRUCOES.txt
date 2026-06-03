@@ -1,0 +1,290 @@
+=====================================================================
+  LAB IoT - MQTT / Node-RED / Dashboard
+  Roteiro COMPLETO de execucao no Raspberry Pi (do zero)
+=====================================================================
+
+  Topico MQTT : casa/sala/temperatura
+  Payload     : {"sensor":"ESP32-01","temperatura":25.4,
+                 "umidade":61,"timestamp":1747580000}
+  Fluxo       : MQTT IN -> Function -> Gauge
+                                    -> Chart
+
+  Arquivos nesta pasta (Windows, no seu PC):
+    publisher_temp.c       publisher MQTT em C
+    flow_node_red.json     fluxo Node-RED pronto para importar
+    function_node.js       codigo JS do Function (ja embutido no fluxo)
+    INSTRUCOES.txt         este arquivo
+
+  Tempo estimado: 15 a 25 minutos.
+
+
+=====================================================================
+  PARTE 0 - PRE-REQUISITOS NO RASPBERRY PI
+=====================================================================
+
+  [ ] Raspberry Pi ligado, com Raspberry Pi OS (Raspbian) instalado.
+  [ ] Conectado a rede (cabo Ethernet ou WiFi).
+  [ ] Acesso pelo terminal (SSH a partir do PC, OU monitor+teclado).
+  [ ] Anotar o IP do RPi. No terminal do RPi rode:
+
+        hostname -I
+
+      Anote esse IP. Sera usado como <IP_DO_RPi> no resto do roteiro.
+
+  [ ] Atualizar pacotes (1x so, no inicio):
+
+        sudo apt update
+        sudo apt upgrade -y
+
+
+=====================================================================
+  PARTE 1 - COPIAR OS ARQUIVOS DO WINDOWS PARA O RASPBERRY PI
+=====================================================================
+
+  Os 4 arquivos estao em:
+      C:\Users\Nick\Desktop\LAB_NOVO_KRAUSS\
+
+  Escolha UMA das 3 opcoes abaixo:
+
+  ------------------------------------------------------------------
+  OPCAO A - SCP (recomendada - direto do Windows para o RPi via SSH)
+  ------------------------------------------------------------------
+
+  No PowerShell do Windows (este PC), rode (troque o IP e o usuario):
+
+      cd C:\Users\Nick\Desktop\LAB_NOVO_KRAUSS
+      scp publisher_temp.c flow_node_red.json function_node.js INSTRUCOES.txt pi@<IP_DO_RPi>:~/
+
+  (usuario padrao do RPi geralmente e "pi"; ele pede a senha)
+
+  Depois, no RPi:
+
+      ls ~        # confirma que os 4 arquivos chegaram
+
+  ------------------------------------------------------------------
+  OPCAO B - Pendrive
+  ------------------------------------------------------------------
+
+  1. Copie os 4 arquivos para um pendrive no Windows.
+  2. Plugue o pendrive no RPi. O Raspbian normalmente monta em
+     /media/pi/<NOME_DO_PENDRIVE>/.
+  3. No terminal do RPi:
+
+         cp /media/pi/<NOME_DO_PENDRIVE>/publisher_temp.c     ~/
+         cp /media/pi/<NOME_DO_PENDRIVE>/flow_node_red.json   ~/
+         cp /media/pi/<NOME_DO_PENDRIVE>/function_node.js     ~/
+         cp /media/pi/<NOME_DO_PENDRIVE>/INSTRUCOES.txt       ~/
+         ls ~
+
+  ------------------------------------------------------------------
+  OPCAO C - Copiar e colar pelo navegador do RPi
+  ------------------------------------------------------------------
+
+  Voce nao precisa transferir o JSON: dentro do editor do Node-RED
+  (Parte 4) tem um campo de texto onde voce cola o conteudo do arquivo
+  diretamente. Mesmo para o C:
+
+      No RPi, abra o terminal e digite:
+          nano publisher_temp.c
+
+      Copie o conteudo do arquivo aqui no Windows e cole no editor
+      nano. Salve com Ctrl+O, Enter, Ctrl+X.
+
+
+=====================================================================
+  PARTE 2 - INSTALAR O BROKER MQTT (Mosquitto) no RPi
+=====================================================================
+
+  No terminal do RPi:
+
+      sudo apt install mosquitto mosquitto-clients libmosquitto-dev -y
+      sudo systemctl enable mosquitto
+      sudo systemctl start mosquitto
+      sudo systemctl status mosquitto
+
+  Voce deve ver a linha:    Active: active (running)
+  (Pressione "q" para sair do status.)
+
+  Teste rapido (em 2 terminais SSH separados, ou 2 abas):
+
+      Terminal A (escuta):
+          mosquitto_sub -h localhost -t casa/sala/temperatura
+
+      Terminal B (publica):
+          mosquitto_pub -h localhost -t casa/sala/temperatura -m "teste 25.4"
+
+  Se "teste 25.4" aparecer no Terminal A, o broker esta OK.
+  Encerre o Terminal A com Ctrl+C.
+
+
+=====================================================================
+  PARTE 3 - INSTALAR NODE-RED + PACOTE DE DASHBOARD
+=====================================================================
+
+  3.1) Se o RPi ja NAO tiver Node-RED, instale (script oficial):
+
+       bash <(curl -sL https://raw.githubusercontent.com/node-red/linux-installers/master/deb/update-nodejs-and-nodered)
+
+       Responda "y" nas perguntas. Demora alguns minutos.
+
+       Depois:
+           sudo systemctl enable nodered.service
+           sudo systemctl start  nodered.service
+
+       Conferir:
+           sudo systemctl status nodered     # Active: active (running)
+
+  3.2) Instalar o pacote de Dashboard (Gauge, Chart):
+
+       cd ~/.node-red
+       npm install node-red-dashboard
+       node-red-restart
+
+  3.3) Abrir o editor pelo navegador (PC ou RPi):
+
+           http://<IP_DO_RPi>:1880
+
+       Voce deve ver a tela do Node-RED com a paleta de nos a esquerda.
+
+
+=====================================================================
+  PARTE 4 - IMPORTAR O FLUXO flow_node_red.json
+=====================================================================
+
+  4.1) No editor (http://<IP_DO_RPi>:1880):
+       - Clique no menu (icone com 3 tracinhos, canto sup. direito).
+       - Clique em "Import".
+
+  4.2) Na janela de Import:
+       - Clique em "select a file to import"  e escolha
+         flow_node_red.json (que voce copiou para o RPi),
+         OU
+       - Abra o flow_node_red.json no Bloco de Notas (Windows), copie
+         TODO o conteudo, e cole na caixa de texto da janela.
+
+  4.3) Clique em "Import".
+
+  4.4) Voce vera 5 nos novos na aba "Aula MQTT":
+       MQTT IN  ->  Extrai Temperatura  ->  Gauge Temperatura
+                                        ->  Chart Temperatura
+
+  4.5) Clique em "implementar" (botao vermelho, canto sup. direito).
+
+  4.6) Confira no no MQTT IN: deve aparecer "connected" em verde
+       logo abaixo dele. Se aparecer "disconnected", revise se o
+       Mosquitto esta rodando (Parte 2).
+
+
+=====================================================================
+  PARTE 5 - COMPILAR E RODAR O PUBLISHER (publisher_temp.c)
+=====================================================================
+
+  No terminal do RPi, no diretorio onde esta o publisher_temp.c:
+
+      cd ~
+      gcc publisher_temp.c -o publisher_temp -lmosquitto
+      ./publisher_temp
+
+  Saida esperada (a cada 2 segundos):
+
+      IP local detectado: 192.168.x.x
+      Conectado ao broker MQTT.
+
+      Publicando MQTT:
+      {"sensor":"ESP32-01","temperatura":25.4,"umidade":61,"timestamp":1747580000}
+
+      Publicando MQTT:
+      {"sensor":"ESP32-01","temperatura":25.6,"umidade":61,"timestamp":1747580002}
+      ...
+
+  Deixe ESSE terminal rodando. Para parar, depois, use Ctrl+C.
+
+
+=====================================================================
+  PARTE 6 - VALIDAR O DASHBOARD
+=====================================================================
+
+  Abra no navegador:
+
+      http://<IP_DO_RPi>:1880/ui
+
+  Voce deve ver:
+      - GAUGE com o valor da temperatura subindo (25.4 -> 35.0)
+      - CHART desenhando uma linha que sobe, reinicia em 25, sobe...
+
+  Se nao atualizar:
+      - Volte no editor (1880) e confira a bolinha verde "connected"
+        sob o no MQTT IN.
+      - Confirme que o publisher_temp ainda esta rodando no terminal.
+      - Teste:  mosquitto_sub -h localhost -t casa/sala/temperatura
+        Tem que aparecer os JSONs vindo a cada 2s.
+
+
+=====================================================================
+  PARTE 7 - APRESENTACAO PARA O PROFESSOR
+=====================================================================
+
+  Tenha 3 janelas abertas durante a demo:
+
+   (1) Terminal do RPi rodando ./publisher_temp
+        -> mostra os JSONs sendo publicados
+   (2) Editor Node-RED   http://<IP_DO_RPi>:1880
+        -> mostra o fluxo MQTT IN -> Function -> Gauge / Chart
+        -> abra o no Function (duplo clique) p/ mostrar o codigo JS
+   (3) Dashboard         http://<IP_DO_RPi>:1880/ui
+        -> mostra Gauge e Chart atualizando em tempo real
+
+  Pontos para EXPLICAR (10% da nota):
+   - Topico MQTT (casa/sala/temperatura) e o modelo publish/subscribe.
+   - JSON do payload e como a Function faz JSON.parse + extrai
+     dados.temperatura.
+   - Por que ha 2 saidas na Function (uma p/ Gauge, outra p/ Chart).
+   - QoS 0 do MQTT IN e "auto-deteccao" como tipo de saida.
+
+
+=====================================================================
+  PARTE 8 - MAPEAMENTO PARA OS CRITERIOS DE AVALIACAO
+=====================================================================
+
+  Criterio                                      Peso    Atendido em
+  -------------------------------------------   ----    --------------
+  Instalacao e funcionamento do Mosquitto       15%     Parte 2
+  Configuracao correta do MQTT IN no Node-RED   20%     Parte 4 + JSON
+  Funcionamento do Gauge                        15%     Parte 6
+  Funcionamento do Chart historico              15%     Parte 6
+  Interpretacao correta do JSON no Function     15%     function_node.js
+  Organizacao do fluxo Node-RED                 10%     flow_node_red.json
+  Demonstracao pratica e explicacao tecnica     10%     Parte 7
+
+
+=====================================================================
+  PARTE 9 - TROUBLESHOOTING (problemas comuns)
+=====================================================================
+
+  ERRO: "mosquitto.h: No such file or directory" ao compilar
+        -> faltou:  sudo apt install libmosquitto-dev -y
+
+  ERRO: "Erro ao conectar ao broker MQTT" ao rodar ./publisher_temp
+        -> Mosquitto nao esta rodando.
+           sudo systemctl status mosquitto
+           sudo systemctl start  mosquitto
+
+  ERRO: No MQTT IN aparece "disconnected"
+        -> Verifique que o "Broker Local" aponta para localhost:1883
+           (duplo clique no MQTT IN -> lapis ao lado de Server).
+
+  ERRO: Dashboard /ui retorna "Cannot GET /ui"
+        -> Faltou instalar o pacote:
+           cd ~/.node-red && npm install node-red-dashboard
+           node-red-restart
+
+  ERRO: Gauge nao atualiza, mas mosquitto_sub recebe os JSONs
+        -> Voce esqueceu de clicar em "implementar" no Node-RED.
+
+  ERRO: "Address already in use" ao iniciar Node-RED
+        -> Ja tem instancia rodando:
+           sudo systemctl restart nodered
+
+=====================================================================
+                            FIM DO ROTEIRO
+=====================================================================
