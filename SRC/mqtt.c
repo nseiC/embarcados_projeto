@@ -308,9 +308,7 @@ static void handle_command(mqtt_context_t *ctx, const mqtt_command_t *cmd)
         break;
 
     case MQTT_CMD_RESET_FSM:
-        pthread_mutex_lock(&ctx->atuadores->state_mutex);
-        ctx->atuadores->state.fsm_state = FSM_MONITORING;
-        pthread_mutex_unlock(&ctx->atuadores->state_mutex);
+        atuadores_post_event(ctx->atuadores, FSM_EVT_RESET_REQUESTED);
         mqtt_publish_ack(ctx, cmd->cmd_id, "OK",
                          elapsed_ms_since(&cmd->received_at));
         break;
@@ -382,6 +380,7 @@ static void on_message(struct mosquitto *mosq,
 
     memcpy(payload, message->payload, (size_t)message->payloadlen);
     mqtt_metric_inc(ctx, &ctx->mqtt_rx_count);
+    atuadores_post_event(ctx->atuadores, FSM_EVT_MQTT_RX);
 
     if (parse_command_json(payload, &cmd) != 0) {
         mqtt_metric_inc(ctx, &ctx->invalid_json_count);

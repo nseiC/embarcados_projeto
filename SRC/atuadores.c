@@ -8,6 +8,7 @@
 #define SERVO_MIN_PULSE_US 500
 #define SERVO_MAX_PULSE_US 2500
 #define SERVO_PULSE_CYCLES 25
+#define FSM_TICK_MS 100
 
 #if ATUADORES_HAS_GPIOD
 #if defined(GPIOD_API)
@@ -121,6 +122,7 @@ void atuadores_context_init(atuadores_context_t *ctx)
     pthread_mutex_init(&ctx->state_mutex, NULL);
     pthread_mutex_init(&ctx->metrics_mutex, NULL);
     pthread_mutex_init(&ctx->heartbeat_mutex, NULL);
+    pthread_mutex_init(&ctx->fsm_events.mutex, NULL);
 
     ctx->state.led = 0;
     ctx->state.relay = 0;
@@ -137,6 +139,7 @@ void atuadores_context_destroy(atuadores_context_t *ctx)
     pthread_mutex_destroy(&ctx->state_mutex);
     pthread_mutex_destroy(&ctx->metrics_mutex);
     pthread_mutex_destroy(&ctx->heartbeat_mutex);
+    pthread_mutex_destroy(&ctx->fsm_events.mutex);
 }
 
 atuador_status_t atuadores_enqueue(atuadores_context_t *ctx, atuador_cmd_t cmd)
@@ -379,6 +382,30 @@ void atuadores_hw_close(void)
 #endif
 }
 
+static atuador_status_t validate_command(const atuador_cmd_t *cmd)
+{
+    switch (cmd->type) {
+    case ATUADOR_CMD_SET_LED:
+    case ATUADOR_CMD_SET_RELAY:
+        if (cmd->value != 0 && cmd->value != 1) {
+            return ATUADOR_STATUS_INVALID_VALUE;
+        }
+        return ATUADOR_STATUS_OK;
+
+    case ATUADOR_CMD_SET_SERVO:
+        if (cmd->value < 0 || cmd->value > 180) {
+            return ATUADOR_STATUS_INVALID_VALUE;
+        }
+        return ATUADOR_STATUS_OK;
+
+    case ATUADOR_CMD_STOP:
+        return ATUADOR_STATUS_OK;
+
+    default:
+        return ATUADOR_STATUS_ERROR;
+    }
+}
+
 atuador_status_t aplicar_led(int state)
 {
     if (state != 0 && state != 1) {
@@ -483,6 +510,193 @@ atuador_status_t aplicar_servo(int angle)
     return ATUADOR_STATUS_OK;
 }
 
+static int fsm_init(atuadores_context_t *ctx)
+{
+    printf("[FSM] INIT: inicializando estruturas compartilhadas e GPIOs\n");
+
+    update_heartbeat(ctx);
+
+    if (atuadores_hw_init() != 0) {
+        metrics_inc(&ctx->metrics_mutex, &ctx->metrics.actuator_errors);
+        atuadores_post_event(ctx, FSM_EVT_INIT_FAILED);
+        printf("[FSM] INIT: falha no hardware (postado INIT_FAILED)\n");
+        return -1;
+    }
+
+    pthread_mutex_lock(&ctx->state_mutex);
+    ctx->state.led = 0;
+    ctx->state.relay = 0;
+    ctx->state.servo_deg = 90;
+    pthread_mutex_unlock(&ctx->state_mutex);
+
+    atuadores_post_event(ctx, FSM_EVT_INIT_DONE);
+    printf("[FSM] INIT: inicializacao completa (postado INIT_DONE)\n");
+    return 0;
+}
+
+void atuadores_post_event(atuadores_context_t *ctx, fsm_event_t evt)
+{
+    fsm_event_queue_t *q;
+
+    if (ctx == NULL) {
+        return;
+    }
+
+    q = &ctx->fsm_events;
+
+    pthread_mutex_lock(&q->mutex);
+    if (q->count < FSM_EVENT_QUEUE_CAPACITY) {
+        q->items[q->tail] = evt;
+        q->tail = (q->tail + 1) % FSM_EVENT_QUEUE_CAPACITY;
+        q->count++;
+    }
+    pthread_mutex_unlock(&q->mutex);
+}
+
+static int pop_fsm_event(atuadores_context_t *ctx, fsm_event_t *evt)
+{
+    fsm_event_queue_t *q = &ctx->fsm_events;
+    int ok = 0;
+
+    pthread_mutex_lock(&q->mutex);
+    if (q->count > 0) {
+        *evt = q->items[q->head];
+        q->head = (q->head + 1) % FSM_EVENT_QUEUE_CAPACITY;
+        q->count--;
+        ok = 1;
+    }
+    pthread_mutex_unlock(&q->mutex);
+
+    return ok;
+}
+
+static fsm_state_t read_fsm_state(atuadores_context_t *ctx)
+{
+    fsm_state_t state;
+
+    pthread_mutex_lock(&ctx->state_mutex);
+    state = ctx->state.fsm_state;
+    pthread_mutex_unlock(&ctx->state_mutex);
+
+    return state;
+}
+
+const char *fsm_event_to_string(fsm_event_t evt)
+{
+    switch (evt) {
+    case FSM_EVT_INIT_DONE:        return "INIT_DONE";
+    case FSM_EVT_INIT_FAILED:      return "INIT_FAILED";
+    case FSM_EVT_MQTT_RX:          return "MQTT_RX";
+    case FSM_EVT_CMD_DEQUEUED:     return "CMD_DEQUEUED";
+    case FSM_EVT_CMD_VALIDATED:    return "CMD_VALIDATED";
+    case FSM_EVT_CMD_DONE:         return "CMD_DONE";
+    case FSM_EVT_CMD_INVALID:      return "CMD_INVALID";
+    case FSM_EVT_CMD_ERROR:        return "CMD_ERROR";
+    case FSM_EVT_DEADLINE_MISSED:  return "DEADLINE_MISSED";
+    case FSM_EVT_RESET_REQUESTED:  return "RESET_REQUESTED";
+    default:                       return "UNKNOWN";
+    }
+}
+
+static fsm_state_t fsm_next_state(fsm_state_t current, fsm_event_t evt)
+{
+    switch (current) {
+    case FSM_INIT:
+        if (evt == FSM_EVT_INIT_DONE)   return FSM_IDLE;
+        if (evt == FSM_EVT_INIT_FAILED) return FSM_ERROR;
+        break;
+
+    case FSM_IDLE:
+        if (evt == FSM_EVT_MQTT_RX) return FSM_MONITORING;
+        break;
+
+    case FSM_MONITORING:
+        if (evt == FSM_EVT_CMD_DEQUEUED)    return FSM_PROCESSING_COMMAND;
+        if (evt == FSM_EVT_RESET_REQUESTED) return FSM_RECOVERY;
+        break;
+
+    case FSM_PROCESSING_COMMAND:
+        if (evt == FSM_EVT_CMD_VALIDATED)   return FSM_ACTUATING;
+        if (evt == FSM_EVT_DEADLINE_MISSED) return FSM_TIMEOUT;
+        if (evt == FSM_EVT_CMD_INVALID ||
+            evt == FSM_EVT_CMD_ERROR)       return FSM_ERROR;
+        break;
+
+    case FSM_ACTUATING:
+        if (evt == FSM_EVT_CMD_DONE)        return FSM_MONITORING;
+        if (evt == FSM_EVT_DEADLINE_MISSED) return FSM_TIMEOUT;
+        if (evt == FSM_EVT_CMD_ERROR ||
+            evt == FSM_EVT_CMD_INVALID)     return FSM_ERROR;
+        break;
+
+    case FSM_TIMEOUT:
+    case FSM_ERROR:
+        if (evt == FSM_EVT_RESET_REQUESTED) return FSM_RECOVERY;
+        break;
+
+    case FSM_RECOVERY:
+        break;
+
+    default:
+        break;
+    }
+
+    return current;
+}
+
+void *thread_fsm_update(void *arg)
+{
+    atuadores_context_t *ctx = (atuadores_context_t *)arg;
+    struct timespec tick = {
+        .tv_sec = FSM_TICK_MS / 1000,
+        .tv_nsec = (long)(FSM_TICK_MS % 1000) * 1000000L,
+    };
+
+    if (ctx == NULL) {
+        return NULL;
+    }
+
+    printf("[FSM_UPDATE] orquestrador iniciado (tick %dms)\n", FSM_TICK_MS);
+
+    while (ctx->running) {
+        fsm_event_t evt;
+        fsm_state_t current;
+
+        nanosleep(&tick, NULL);
+
+        if (!ctx->running) {
+            break;
+        }
+
+        while (pop_fsm_event(ctx, &evt)) {
+            fsm_state_t next;
+
+            current = read_fsm_state(ctx);
+            next = fsm_next_state(current, evt);
+
+            if (next != current) {
+                set_fsm_state(ctx, next);
+                printf("[FSM] %s --(%s)--> %s\n",
+                       fsm_state_to_string(current),
+                       fsm_event_to_string(evt),
+                       fsm_state_to_string(next));
+            }
+        }
+
+        current = read_fsm_state(ctx);
+        if (current == FSM_TIMEOUT) {
+            set_fsm_state(ctx, FSM_RECOVERY);
+            printf("[FSM] TIMEOUT --(tick)--> RECOVERY\n");
+        } else if (current == FSM_RECOVERY) {
+            set_fsm_state(ctx, FSM_IDLE);
+            printf("[FSM] RECOVERY --(tick)--> IDLE\n");
+        }
+    }
+
+    printf("[FSM_UPDATE] orquestrador encerrado\n");
+    return NULL;
+}
+
 void *thread_atuadores(void *arg)
 {
     atuadores_context_t *ctx = (atuadores_context_t *)arg;
@@ -492,19 +706,13 @@ void *thread_atuadores(void *arg)
         return NULL;
     }
 
-    set_fsm_state(ctx, FSM_IDLE);
-
-    if (atuadores_hw_init() != 0) {
-        metrics_inc(&ctx->metrics_mutex, &ctx->metrics.actuator_errors);
-        set_fsm_state(ctx, FSM_ERROR);
+    if (fsm_init(ctx) != 0) {
         pthread_mutex_lock(&ctx->queue.mutex);
         ctx->running = 0;
         pthread_cond_broadcast(&ctx->queue.not_empty);
         pthread_mutex_unlock(&ctx->queue.mutex);
         return NULL;
     }
-
-    set_fsm_state(ctx, FSM_MONITORING);
 
     while (queue_pop(ctx, &cmd)) {
         atuador_status_t status = ATUADOR_STATUS_OK;
@@ -520,16 +728,37 @@ void *thread_atuadores(void *arg)
         }
 
         metrics_inc(&ctx->metrics_mutex, &ctx->metrics.total_cmds);
-        set_fsm_state(ctx, FSM_PROCESSING_COMMAND);
+        atuadores_post_event(ctx, FSM_EVT_CMD_DEQUEUED);
+
+        printf("[FSM] PROCESSING_COMMAND: cmd_id=%d type=%d value=%d deadline=%dms\n",
+               cmd.cmd_id, (int)cmd.type, cmd.value, cmd.deadline_ms);
 
         if (cmd.deadline_ms > 0 &&
             elapsed_ms_since(&cmd.received_at) > cmd.deadline_ms) {
             metrics_inc(&ctx->metrics_mutex, &ctx->metrics.deadlines_missed);
-            set_fsm_state(ctx, FSM_TIMEOUT);
+            printf("[FSM] PROCESSING_COMMAND: deadline excedido (%ldms > %dms)\n",
+                   elapsed_ms_since(&cmd.received_at), cmd.deadline_ms);
+            atuadores_post_event(ctx, FSM_EVT_DEADLINE_MISSED);
             continue;
         }
 
-        set_fsm_state(ctx, FSM_ACTUATING);
+        {
+            atuador_status_t validation = validate_command(&cmd);
+            if (validation == ATUADOR_STATUS_INVALID_VALUE) {
+                metrics_inc(&ctx->metrics_mutex, &ctx->metrics.invalid_value_count);
+                printf("[FSM] PROCESSING_COMMAND: valor invalido (%d)\n", cmd.value);
+                atuadores_post_event(ctx, FSM_EVT_CMD_INVALID);
+                continue;
+            }
+            if (validation != ATUADOR_STATUS_OK) {
+                metrics_inc(&ctx->metrics_mutex, &ctx->metrics.actuator_errors);
+                printf("[FSM] PROCESSING_COMMAND: tipo de comando desconhecido\n");
+                atuadores_post_event(ctx, FSM_EVT_CMD_ERROR);
+                continue;
+            }
+        }
+
+        atuadores_post_event(ctx, FSM_EVT_CMD_VALIDATED);
 
         switch (cmd.type) {
         case ATUADOR_CMD_SET_LED:
@@ -566,21 +795,20 @@ void *thread_atuadores(void *arg)
 
         if (status == ATUADOR_STATUS_INVALID_VALUE) {
             metrics_inc(&ctx->metrics_mutex, &ctx->metrics.invalid_value_count);
-            set_fsm_state(ctx, FSM_ERROR);
+            atuadores_post_event(ctx, FSM_EVT_CMD_INVALID);
         } else if (status != ATUADOR_STATUS_OK) {
             metrics_inc(&ctx->metrics_mutex, &ctx->metrics.actuator_errors);
-            set_fsm_state(ctx, FSM_ERROR);
+            atuadores_post_event(ctx, FSM_EVT_CMD_ERROR);
         } else if (cmd.deadline_ms > 0 &&
                    elapsed_ms_since(&cmd.received_at) > cmd.deadline_ms) {
             metrics_inc(&ctx->metrics_mutex, &ctx->metrics.deadlines_missed);
-            set_fsm_state(ctx, FSM_TIMEOUT);
+            atuadores_post_event(ctx, FSM_EVT_DEADLINE_MISSED);
         } else {
-            set_fsm_state(ctx, FSM_MONITORING);
+            atuadores_post_event(ctx, FSM_EVT_CMD_DONE);
         }
     }
 
     atuadores_hw_close();
-    set_fsm_state(ctx, FSM_IDLE);
 
     return NULL;
 }
