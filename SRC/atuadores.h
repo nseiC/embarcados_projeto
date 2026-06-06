@@ -32,5 +32,6 @@ atuador_status_t aplicar_relay(int state);
 atuador_status_t aplicar_servo(int angle);
 
 void *thread_atuadores(void *arg);
+void *thread_fsm_update(void *arg);
 
 #endif
