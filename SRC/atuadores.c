@@ -122,6 +122,7 @@ void atuadores_context_init(atuadores_context_t *ctx)
     pthread_mutex_init(&ctx->state_mutex, NULL);
     pthread_mutex_init(&ctx->metrics_mutex, NULL);
     pthread_mutex_init(&ctx->heartbeat_mutex, NULL);
+    pthread_mutex_init(&ctx->sensors_mutex, NULL);
     pthread_mutex_init(&ctx->fsm_events.mutex, NULL);
 
     ctx->state.led = 0;
@@ -139,6 +140,7 @@ void atuadores_context_destroy(atuadores_context_t *ctx)
     pthread_mutex_destroy(&ctx->state_mutex);
     pthread_mutex_destroy(&ctx->metrics_mutex);
     pthread_mutex_destroy(&ctx->heartbeat_mutex);
+    pthread_mutex_destroy(&ctx->sensors_mutex);
     pthread_mutex_destroy(&ctx->fsm_events.mutex);
 }
 

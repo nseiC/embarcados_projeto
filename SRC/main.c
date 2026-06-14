@@ -1,6 +1,7 @@
-// update 
+// update
 #include "atuadores.h"
 #include "mqtt.h"
+#include "sensors.h"
 
 #include <pthread.h>
 #include <signal.h>
@@ -27,6 +28,7 @@ int main(int argc, char **argv)
     pthread_t atuadores_thread;
     pthread_t mqtt_thread;
     pthread_t fsm_update_thread;
+    pthread_t sensors_thread;
 
     if (argc > 1) {
         host = argv[1];
@@ -60,11 +62,22 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    if (pthread_create(&sensors_thread, NULL, thread_sensors, &atuadores) != 0) {
+        fprintf(stderr, "erro criando thread de sensores\n");
+        atuadores_request_stop(&atuadores);
+        pthread_join(atuadores_thread, NULL);
+        pthread_join(fsm_update_thread, NULL);
+        mqtt_context_destroy(&mqtt);
+        atuadores_context_destroy(&atuadores);
+        return 1;
+    }
+
     if (pthread_create(&mqtt_thread, NULL, thread_mqtt, &mqtt) != 0) {
         fprintf(stderr, "erro criando thread MQTT\n");
         atuadores_request_stop(&atuadores);
         pthread_join(atuadores_thread, NULL);
         pthread_join(fsm_update_thread, NULL);
+        pthread_join(sensors_thread, NULL);
         mqtt_context_destroy(&mqtt);
         atuadores_context_destroy(&atuadores);
         return 1;
@@ -83,6 +96,7 @@ int main(int argc, char **argv)
     pthread_join(mqtt_thread, NULL);
     pthread_join(atuadores_thread, NULL);
     pthread_join(fsm_update_thread, NULL);
+    pthread_join(sensors_thread, NULL);
 
     mqtt_context_destroy(&mqtt);
     atuadores_context_destroy(&atuadores);

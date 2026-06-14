@@ -559,21 +559,44 @@ int mqtt_publish_state(mqtt_context_t *ctx)
 {
     shared_state_t state;
     actuator_metrics_t metrics;
+    sensor_readings_t sensors;
     size_t queue_size;
+    char sensors_block[128];
     char payload[512];
+    int written = 0;
 
     metrics_snapshot(ctx, &state, &metrics, &queue_size);
     (void)metrics;
     (void)queue_size;
 
+    pthread_mutex_lock(&ctx->atuadores->sensors_mutex);
+    sensors = ctx->atuadores->sensors;
+    pthread_mutex_unlock(&ctx->atuadores->sensors_mutex);
+
+    written = snprintf(sensors_block, sizeof(sensors_block), "{");
+    if (sensors.temperature_valid) {
+        written += snprintf(sensors_block + written,
+                            sizeof(sensors_block) - written,
+                            "\"temperature_c\":%.2f", sensors.temperature_c);
+    }
+    if (sensors.distance_valid) {
+        written += snprintf(sensors_block + written,
+                            sizeof(sensors_block) - written,
+                            "%s\"distance_cm\":%.2f",
+                            sensors.temperature_valid ? "," : "",
+                            sensors.distance_cm);
+    }
+    snprintf(sensors_block + written, sizeof(sensors_block) - written, "}");
+
     snprintf(payload, sizeof(payload),
              "{\"fsm_state\":\"%s\","
-             "\"sensors\":{},"
+             "\"sensors\":%s,"
              "\"actuators\":{\"led\":%d,\"relay\":%d,\"servo_deg\":%d},"
              "\"system\":{\"cpu_usage_percent\":0.0,"
              "\"ram_usage_percent\":0.0,"
              "\"cpu_temp_c\":0.0}}",
              fsm_state_to_string(state.fsm_state),
+             sensors_block,
              state.led,
              state.relay,
              state.servo_deg);

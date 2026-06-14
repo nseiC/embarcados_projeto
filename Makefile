@@ -12,7 +12,7 @@ LDFLAGS = -pthread
 LIBS    = -lmosquitto -lcjson -lgpiod
 
 SRC_DIR = SRC
-SOURCES = $(SRC_DIR)/main.c $(SRC_DIR)/atuadores.c $(SRC_DIR)/mqtt.c
+SOURCES = $(SRC_DIR)/main.c $(SRC_DIR)/atuadores.c $(SRC_DIR)/mqtt.c $(SRC_DIR)/sensors.c
 OBJECTS = $(SOURCES:.c=.o)
 TARGET  = atuadores
 

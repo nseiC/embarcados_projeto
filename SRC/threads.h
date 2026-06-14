@@ -82,6 +82,13 @@ typedef struct {
 } shared_state_t;
 
 typedef struct {
+    float temperature_c;
+    float distance_cm;
+    int temperature_valid;
+    int distance_valid;
+} sensor_readings_t;
+
+typedef struct {
     unsigned long total_cmds;
     unsigned long deadlines_missed;
     unsigned long queue_full_count;
@@ -93,9 +100,11 @@ typedef struct {
     atuadores_queue_t queue;
     shared_state_t state;
     actuator_metrics_t metrics;
+    sensor_readings_t sensors;
     pthread_mutex_t state_mutex;
     pthread_mutex_t metrics_mutex;
     pthread_mutex_t heartbeat_mutex;
+    pthread_mutex_t sensors_mutex;
     struct timespec actuator_heartbeat;
     int running;
     fsm_event_queue_t fsm_events;
