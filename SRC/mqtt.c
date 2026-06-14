@@ -346,7 +346,8 @@ static void on_connect(struct mosquitto *mosq, void *userdata, int rc)
 
     ctx->connected = 1;
     mosquitto_subscribe(mosq, NULL, ctx->topic_cmd, MQTT_QOS);
-    mqtt_publish_log(ctx, "MQTT", "conectado e inscrito no topico de comandos");
+    atuadores_log(ctx->atuadores, "MQTT",
+                  "conectado e inscrito em %s", ctx->topic_cmd);
 }
 
 static void on_disconnect(struct mosquitto *mosq, void *userdata, int rc)
@@ -384,7 +385,7 @@ static void on_message(struct mosquitto *mosq,
 
     if (parse_command_json(payload, &cmd) != 0) {
         mqtt_metric_inc(ctx, &ctx->invalid_json_count);
-        mqtt_publish_log(ctx, "MQTT_RX", "JSON invalido recebido");
+        atuadores_log(ctx->atuadores, "MQTT_RX", "JSON invalido recebido");
         free(payload);
         return;
     }
@@ -496,6 +497,48 @@ void mqtt_stop(mqtt_context_t *ctx)
     mosquitto_destroy(ctx->client);
     ctx->client = NULL;
     mosquitto_lib_cleanup();
+}
+
+static int log_pop(atuadores_context_t *ctx, log_entry_t *out)
+{
+    log_queue_t *q = &ctx->log_queue;
+
+    pthread_mutex_lock(&q->mutex);
+    while (q->count == 0 && ctx->running) {
+        pthread_cond_wait(&q->not_empty, &q->mutex);
+    }
+    if (q->count == 0) {
+        pthread_mutex_unlock(&q->mutex);
+        return 0;
+    }
+    *out = q->items[q->head];
+    q->head = (q->head + 1) % LOG_QUEUE_CAPACITY;
+    q->count--;
+    pthread_mutex_unlock(&q->mutex);
+    return 1;
+}
+
+void *thread_logger(void *arg)
+{
+    mqtt_context_t *ctx = (mqtt_context_t *)arg;
+    log_entry_t entry;
+
+    if (ctx == NULL || ctx->atuadores == NULL) {
+        return NULL;
+    }
+
+    printf("[LOGGER] thread iniciada\n");
+
+    while (log_pop(ctx->atuadores, &entry)) {
+        printf("[LOG][%s] %s\n", entry.tag, entry.message);
+
+        if (ctx->client != NULL && ctx->connected) {
+            mqtt_publish_log(ctx, entry.tag, entry.message);
+        }
+    }
+
+    printf("[LOGGER] thread encerrada\n");
+    return NULL;
 }
 
 void *thread_mqtt(void *arg)

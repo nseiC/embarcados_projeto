@@ -10,7 +10,7 @@
 #include "threads.h"
 
 #define MQTT_COMMAND_QUEUE_CAPACITY 16
-#define MQTT_DEFAULT_HOST "localhost"
+#define MQTT_DEFAULT_HOST "127.0.0.1"
 #define MQTT_DEFAULT_PORT 1883
 #define MQTT_KEEPALIVE_SECONDS 60
 #define MQTT_CLIENT_ID "grupo1-embarcados"
@@ -78,6 +78,7 @@ void mqtt_context_destroy(mqtt_context_t *ctx);
 int mqtt_start(mqtt_context_t *ctx);
 void mqtt_stop(mqtt_context_t *ctx);
 void *thread_mqtt(void *arg);
+void *thread_logger(void *arg);
 
 int mqtt_publish_ack(mqtt_context_t *ctx,
                      int cmd_id,

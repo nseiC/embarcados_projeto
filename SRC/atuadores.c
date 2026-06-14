@@ -1,6 +1,7 @@
 #include "atuadores.h"
 
 #include <errno.h>
+#include <stdarg.h>
 #include <string.h>
 #include <time.h>
 
@@ -124,6 +125,8 @@ void atuadores_context_init(atuadores_context_t *ctx)
     pthread_mutex_init(&ctx->heartbeat_mutex, NULL);
     pthread_mutex_init(&ctx->sensors_mutex, NULL);
     pthread_mutex_init(&ctx->fsm_events.mutex, NULL);
+    pthread_mutex_init(&ctx->log_queue.mutex, NULL);
+    pthread_cond_init(&ctx->log_queue.not_empty, NULL);
 
     ctx->state.led = 0;
     ctx->state.relay = 0;
@@ -142,6 +145,8 @@ void atuadores_context_destroy(atuadores_context_t *ctx)
     pthread_mutex_destroy(&ctx->heartbeat_mutex);
     pthread_mutex_destroy(&ctx->sensors_mutex);
     pthread_mutex_destroy(&ctx->fsm_events.mutex);
+    pthread_cond_destroy(&ctx->log_queue.not_empty);
+    pthread_mutex_destroy(&ctx->log_queue.mutex);
 }
 
 atuador_status_t atuadores_enqueue(atuadores_context_t *ctx, atuador_cmd_t cmd)
@@ -180,6 +185,9 @@ atuador_status_t atuadores_request_stop(atuadores_context_t *ctx)
     cmd.deadline_ms = 1000;
 
     if (atuadores_enqueue(ctx, cmd) == ATUADOR_STATUS_OK) {
+        pthread_mutex_lock(&ctx->log_queue.mutex);
+        pthread_cond_broadcast(&ctx->log_queue.not_empty);
+        pthread_mutex_unlock(&ctx->log_queue.mutex);
         return ATUADOR_STATUS_OK;
     }
 
@@ -187,6 +195,10 @@ atuador_status_t atuadores_request_stop(atuadores_context_t *ctx)
     ctx->running = 0;
     pthread_cond_broadcast(&ctx->queue.not_empty);
     pthread_mutex_unlock(&ctx->queue.mutex);
+
+    pthread_mutex_lock(&ctx->log_queue.mutex);
+    pthread_cond_broadcast(&ctx->log_queue.not_empty);
+    pthread_mutex_unlock(&ctx->log_queue.mutex);
 
     return ATUADOR_STATUS_QUEUE_FULL;
 }
@@ -534,6 +546,34 @@ static int fsm_init(atuadores_context_t *ctx)
     atuadores_post_event(ctx, FSM_EVT_INIT_DONE);
     printf("[FSM] INIT: inicializacao completa (postado INIT_DONE)\n");
     return 0;
+}
+
+void atuadores_log(atuadores_context_t *ctx, const char *tag, const char *fmt, ...)
+{
+    log_entry_t entry;
+    log_queue_t *q;
+    va_list args;
+
+    if (ctx == NULL) {
+        return;
+    }
+
+    snprintf(entry.tag, sizeof(entry.tag), "%s", tag != NULL ? tag : "LOG");
+
+    va_start(args, fmt);
+    vsnprintf(entry.message, sizeof(entry.message), fmt != NULL ? fmt : "", args);
+    va_end(args);
+
+    q = &ctx->log_queue;
+
+    pthread_mutex_lock(&q->mutex);
+    if (q->count < LOG_QUEUE_CAPACITY) {
+        q->items[q->tail] = entry;
+        q->tail = (q->tail + 1) % LOG_QUEUE_CAPACITY;
+        q->count++;
+        pthread_cond_signal(&q->not_empty);
+    }
+    pthread_mutex_unlock(&q->mutex);
 }
 
 void atuadores_post_event(atuadores_context_t *ctx, fsm_event_t evt)

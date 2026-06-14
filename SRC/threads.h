@@ -9,6 +9,9 @@
 
 #define ATUADORES_QUEUE_CAPACITY 16
 #define FSM_EVENT_QUEUE_CAPACITY 64
+#define LOG_QUEUE_CAPACITY 128
+#define LOG_TAG_MAX 32
+#define LOG_MESSAGE_MAX 224
 
 typedef enum {
     FSM_INIT = 0,
@@ -75,6 +78,20 @@ typedef struct {
 } fsm_event_queue_t;
 
 typedef struct {
+    char tag[LOG_TAG_MAX];
+    char message[LOG_MESSAGE_MAX];
+} log_entry_t;
+
+typedef struct {
+    log_entry_t items[LOG_QUEUE_CAPACITY];
+    size_t head;
+    size_t tail;
+    size_t count;
+    pthread_mutex_t mutex;
+    pthread_cond_t not_empty;
+} log_queue_t;
+
+typedef struct {
     int led;
     int relay;
     int servo_deg;
@@ -108,6 +125,7 @@ typedef struct {
     struct timespec actuator_heartbeat;
     int running;
     fsm_event_queue_t fsm_events;
+    log_queue_t log_queue;
 } atuadores_context_t;
 
 const char *fsm_state_to_string(fsm_state_t state);
@@ -119,5 +137,6 @@ atuador_status_t atuadores_enqueue(atuadores_context_t *ctx, atuador_cmd_t cmd);
 atuador_status_t atuadores_request_stop(atuadores_context_t *ctx);
 size_t atuadores_queue_size(atuadores_context_t *ctx);
 void atuadores_post_event(atuadores_context_t *ctx, fsm_event_t evt);
+void atuadores_log(atuadores_context_t *ctx, const char *tag, const char *fmt, ...);
 
 #endif
