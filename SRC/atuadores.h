@@ -18,6 +18,16 @@
 #define ATUADORES_HAS_GPIOD 1
 #endif
 
+#if ATUADORES_HAS_GPIOD
+#if defined(GPIOD_API)
+#define ATUADORES_GPIOD_V1 1
+#define ATUADORES_GPIOD_V2 0
+#else
+#define ATUADORES_GPIOD_V1 0
+#define ATUADORES_GPIOD_V2 1
+#endif
+#endif
+
 #define GPIO_CHIP_NAME "gpiochip0"
 #define GPIO_CHIP_PATH "/dev/" GPIO_CHIP_NAME
 #define LED_GPIO 26

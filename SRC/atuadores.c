@@ -12,14 +12,6 @@
 #define FSM_TICK_MS 100
 
 #if ATUADORES_HAS_GPIOD
-#if defined(GPIOD_API)
-#define ATUADORES_GPIOD_V1 1
-#define ATUADORES_GPIOD_V2 0
-#else
-#define ATUADORES_GPIOD_V1 0
-#define ATUADORES_GPIOD_V2 1
-#endif
-
 static struct gpiod_chip *gpio_chip;
 #if ATUADORES_GPIOD_V1
 static struct gpiod_line *led_line;
