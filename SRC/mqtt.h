@@ -79,6 +79,7 @@ int mqtt_start(mqtt_context_t *ctx);
 void mqtt_stop(mqtt_context_t *ctx);
 void *thread_mqtt(void *arg);
 void *thread_logger(void *arg);
+void *thread_publisher(void *arg);
 
 int mqtt_publish_ack(mqtt_context_t *ctx,
                      int cmd_id,

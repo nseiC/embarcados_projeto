@@ -5,7 +5,6 @@
 
 #define HCSR04_TRIG_GPIO 23
 #define HCSR04_ECHO_GPIO 24
-#define MCP3008_LM35_CHANNEL 0
 #define SENSORS_PERIOD_MS 500
 
 int sensors_hw_init(void);

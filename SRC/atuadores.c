@@ -739,6 +739,63 @@ void *thread_fsm_update(void *arg)
     return NULL;
 }
 
+#define WATCHDOG_PERIOD_S 1
+#define WATCHDOG_TIMEOUT_MS 5000
+
+void *thread_watchdog(void *arg)
+{
+    atuadores_context_t *ctx = (atuadores_context_t *)arg;
+    struct timespec period = { .tv_sec = WATCHDOG_PERIOD_S, .tv_nsec = 0 };
+    int alert = 0;
+
+    if (ctx == NULL) {
+        return NULL;
+    }
+
+    atuadores_log(ctx, "WATCHDOG", "thread iniciada (timeout %dms)",
+                  WATCHDOG_TIMEOUT_MS);
+
+    while (ctx->running) {
+        struct timespec last_hb;
+        struct timespec now;
+        long elapsed_ms;
+        int triggered;
+
+        nanosleep(&period, NULL);
+        if (!ctx->running) {
+            break;
+        }
+
+        pthread_mutex_lock(&ctx->heartbeat_mutex);
+        last_hb = ctx->actuator_heartbeat;
+        pthread_mutex_unlock(&ctx->heartbeat_mutex);
+
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        elapsed_ms = (now.tv_sec - last_hb.tv_sec) * 1000L +
+                     (now.tv_nsec - last_hb.tv_nsec) / 1000000L;
+
+        triggered = (elapsed_ms > WATCHDOG_TIMEOUT_MS);
+
+        if (triggered && !alert) {
+            pthread_mutex_lock(&ctx->metrics_mutex);
+            ctx->metrics.watchdog_events++;
+            pthread_mutex_unlock(&ctx->metrics_mutex);
+
+            atuadores_log(ctx, "WATCHDOG",
+                          "ALERTA: thread_atuadores sem heartbeat ha %ldms",
+                          elapsed_ms);
+            alert = 1;
+        } else if (!triggered && alert) {
+            atuadores_log(ctx, "WATCHDOG",
+                          "thread_atuadores voltou ao normal");
+            alert = 0;
+        }
+    }
+
+    atuadores_log(ctx, "WATCHDOG", "thread encerrada");
+    return NULL;
+}
+
 void *thread_atuadores(void *arg)
 {
     atuadores_context_t *ctx = (atuadores_context_t *)arg;

@@ -111,6 +111,7 @@ typedef struct {
     unsigned long queue_full_count;
     unsigned long invalid_value_count;
     unsigned long actuator_errors;
+    unsigned long watchdog_events;
 } actuator_metrics_t;
 
 typedef struct {

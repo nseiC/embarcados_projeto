@@ -33,5 +33,6 @@ atuador_status_t aplicar_servo(int angle);
 
 void *thread_atuadores(void *arg);
 void *thread_fsm_update(void *arg);
+void *thread_watchdog(void *arg);
 
 #endif

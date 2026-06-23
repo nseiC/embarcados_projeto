@@ -26,6 +26,85 @@ static long elapsed_ms_since(const struct timespec *start)
                   (end.tv_nsec - start->tv_nsec) / 1000000L);
 }
 
+static int read_cpu_percent(float *out)
+{
+    static long prev_total = 0;
+    static long prev_idle = 0;
+    FILE *f;
+    unsigned long u, n, s, i, w, irq, sw, st;
+    long total, dt, di;
+
+    f = fopen("/proc/stat", "r");
+    if (f == NULL) {
+        return -1;
+    }
+    if (fscanf(f, "cpu %lu %lu %lu %lu %lu %lu %lu %lu",
+               &u, &n, &s, &i, &w, &irq, &sw, &st) < 4) {
+        fclose(f);
+        return -1;
+    }
+    fclose(f);
+
+    total = (long)(u + n + s + i + w + irq + sw + st);
+    dt = total - prev_total;
+    di = (long)i - prev_idle;
+    prev_total = total;
+    prev_idle = (long)i;
+
+    if (dt <= 0) {
+        *out = 0.0f;
+        return 0;
+    }
+    *out = 100.0f * (float)(dt - di) / (float)dt;
+    return 0;
+}
+
+static int read_ram_percent(float *out)
+{
+    FILE *f;
+    char line[256];
+    unsigned long total = 0;
+    unsigned long avail = 0;
+    unsigned long mfree = 0;
+    unsigned long used;
+
+    f = fopen("/proc/meminfo", "r");
+    if (f == NULL) {
+        return -1;
+    }
+    while (fgets(line, sizeof(line), f)) {
+        if (sscanf(line, "MemTotal: %lu kB", &total) == 1) continue;
+        if (sscanf(line, "MemAvailable: %lu kB", &avail) == 1) continue;
+        if (sscanf(line, "MemFree: %lu kB", &mfree) == 1) continue;
+    }
+    fclose(f);
+
+    if (total == 0) {
+        return -1;
+    }
+    used = total - (avail > 0 ? avail : mfree);
+    *out = 100.0f * (float)used / (float)total;
+    return 0;
+}
+
+static int read_cpu_temp(float *out)
+{
+    FILE *f;
+    int temp_milli;
+
+    f = fopen("/sys/class/thermal/thermal_zone0/temp", "r");
+    if (f == NULL) {
+        return -1;
+    }
+    if (fscanf(f, "%d", &temp_milli) != 1) {
+        fclose(f);
+        return -1;
+    }
+    fclose(f);
+    *out = (float)temp_milli / 1000.0f;
+    return 0;
+}
+
 static void mqtt_metric_inc(mqtt_context_t *ctx, unsigned long *counter)
 {
     pthread_mutex_lock(&ctx->metrics_mutex);
@@ -541,6 +620,37 @@ void *thread_logger(void *arg)
     return NULL;
 }
 
+#define PUBLISHER_PERIOD_MS 1000
+
+void *thread_publisher(void *arg)
+{
+    mqtt_context_t *ctx = (mqtt_context_t *)arg;
+    struct timespec period = {
+        .tv_sec = PUBLISHER_PERIOD_MS / 1000,
+        .tv_nsec = (long)(PUBLISHER_PERIOD_MS % 1000) * 1000000L,
+    };
+
+    if (ctx == NULL || ctx->atuadores == NULL) {
+        return NULL;
+    }
+
+    atuadores_log(ctx->atuadores, "PUBLISHER",
+                  "thread iniciada (periodo %dms)", PUBLISHER_PERIOD_MS);
+
+    while (ctx->atuadores->running) {
+        nanosleep(&period, NULL);
+        if (!ctx->atuadores->running) {
+            break;
+        }
+        if (ctx->client != NULL && ctx->connected) {
+            mqtt_publish_state(ctx);
+        }
+    }
+
+    atuadores_log(ctx->atuadores, "PUBLISHER", "thread encerrada");
+    return NULL;
+}
+
 void *thread_mqtt(void *arg)
 {
     mqtt_context_t *ctx = (mqtt_context_t *)arg;
@@ -631,18 +741,28 @@ int mqtt_publish_state(mqtt_context_t *ctx)
     }
     snprintf(sensors_block + written, sizeof(sensors_block) - written, "}");
 
+    float cpu_pct = 0.0f;
+    float ram_pct = 0.0f;
+    float cpu_temp = 0.0f;
+    (void)read_cpu_percent(&cpu_pct);
+    (void)read_ram_percent(&ram_pct);
+    (void)read_cpu_temp(&cpu_temp);
+
     snprintf(payload, sizeof(payload),
              "{\"fsm_state\":\"%s\","
              "\"sensors\":%s,"
              "\"actuators\":{\"led\":%d,\"relay\":%d,\"servo_deg\":%d},"
-             "\"system\":{\"cpu_usage_percent\":0.0,"
-             "\"ram_usage_percent\":0.0,"
-             "\"cpu_temp_c\":0.0}}",
+             "\"system\":{\"cpu_usage_percent\":%.1f,"
+             "\"ram_usage_percent\":%.1f,"
+             "\"cpu_temp_c\":%.1f}}",
              fsm_state_to_string(state.fsm_state),
              sensors_block,
              state.led,
              state.relay,
-             state.servo_deg);
+             state.servo_deg,
+             cpu_pct,
+             ram_pct,
+             cpu_temp);
 
     return publish_text(ctx, ctx->topic_state, payload);
 }
@@ -678,7 +798,7 @@ int mqtt_publish_metrics(mqtt_context_t *ctx)
              "{\"total_cmds\":%lu,"
              "\"acks_sent\":%lu,"
              "\"deadlines_missed\":%lu,"
-             "\"watchdog_events\":0,"
+             "\"watchdog_events\":%lu,"
              "\"cmd_queue_size\":%lu,"
              "\"mqtt_cmd_queue_size\":%lu,"
              "\"log_queue_size\":0,"
@@ -692,6 +812,7 @@ int mqtt_publish_metrics(mqtt_context_t *ctx)
              metrics.total_cmds,
              acks_sent,
              metrics.deadlines_missed,
+             metrics.watchdog_events,
              (unsigned long)queue_size,
              (unsigned long)mqtt_queue_size,
              mqtt_rx_count,

@@ -14,9 +14,22 @@
 
 #define SPI_DEVICE "/dev/spidev0.0"
 #define SPI_SPEED_HZ 1000000
-#define MCP3008_VREF 3.3f
 #define HCSR04_TIMEOUT_US 30000
 #define HCSR04_PULSE_TO_CM 58.0f
+
+#define AD7705_VREF 2.5f
+#define AD7705_DRDY_TIMEOUT_MS 1500
+#define AD7705_REG_COMM   0x00
+#define AD7705_REG_SETUP  0x10
+#define AD7705_REG_CLOCK  0x20
+#define AD7705_REG_DATA   0x30
+#define AD7705_READ_BIT   0x08
+#define AD7705_CH1        0x00
+#define AD7705_SETUP_SELFCAL  0x40
+#define AD7705_SETUP_GAIN1    0x00
+#define AD7705_SETUP_UNIPOLAR 0x04
+#define AD7705_SETUP_BUF      0x02
+#define AD7705_CLOCK_50HZ     0x0C
 
 #if ATUADORES_HAS_GPIOD
 static struct gpiod_chip *sensors_chip;
@@ -86,7 +99,7 @@ static int echo_get(void)
 
 static int spi_init(void)
 {
-    uint8_t mode = SPI_MODE_0;
+    uint8_t mode = SPI_MODE_3;
     uint8_t bits = 8;
     uint32_t speed = SPI_SPEED_HZ;
 
@@ -110,10 +123,8 @@ static int spi_init(void)
     return 0;
 }
 
-static int read_mcp3008(int channel)
+static int spi_xfer(const uint8_t *tx, uint8_t *rx, size_t len)
 {
-    uint8_t tx[3] = { 0x01, (uint8_t)(0x80 | ((channel & 0x07) << 4)), 0x00 };
-    uint8_t rx[3] = { 0, 0, 0 };
     struct spi_ioc_transfer tr;
 
     if (spi_fd < 0) {
@@ -123,25 +134,92 @@ static int read_mcp3008(int channel)
     memset(&tr, 0, sizeof(tr));
     tr.tx_buf = (unsigned long)tx;
     tr.rx_buf = (unsigned long)rx;
-    tr.len = 3;
+    tr.len = len;
     tr.speed_hz = SPI_SPEED_HZ;
     tr.bits_per_word = 8;
 
-    if (ioctl(spi_fd, SPI_IOC_MESSAGE(1), &tr) < 0) {
+    return ioctl(spi_fd, SPI_IOC_MESSAGE(1), &tr);
+}
+
+static int ad7705_write(uint8_t value)
+{
+    uint8_t rx = 0;
+    return spi_xfer(&value, &rx, 1);
+}
+
+static int ad7705_read(uint8_t *value, size_t len)
+{
+    uint8_t tx[4] = { 0xFF, 0xFF, 0xFF, 0xFF };
+    if (len > sizeof(tx)) {
         return -1;
     }
+    return spi_xfer(tx, value, len);
+}
 
-    return ((rx[1] & 0x03) << 8) | rx[2];
+static int ad7705_reset(void)
+{
+    uint8_t tx[5] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+    uint8_t rx[5] = { 0 };
+    int rc = spi_xfer(tx, rx, sizeof(tx));
+    usleep(2000);
+    return rc;
+}
+
+static int ad7705_init_channel(uint8_t channel)
+{
+    if (ad7705_write(AD7705_REG_CLOCK | channel) < 0) return -1;
+    if (ad7705_write(AD7705_CLOCK_50HZ) < 0) return -1;
+
+    if (ad7705_write(AD7705_REG_SETUP | channel) < 0) return -1;
+    if (ad7705_write(AD7705_SETUP_SELFCAL |
+                     AD7705_SETUP_GAIN1 |
+                     AD7705_SETUP_UNIPOLAR |
+                     AD7705_SETUP_BUF) < 0) return -1;
+
+    usleep(300000);
+    return 0;
+}
+
+static int ad7705_data_ready(uint8_t channel)
+{
+    uint8_t status;
+    if (ad7705_write(AD7705_REG_COMM | AD7705_READ_BIT | channel) < 0) return -1;
+    if (ad7705_read(&status, 1) < 0) return -1;
+    return (status & 0x80) == 0;
+}
+
+static int ad7705_read_data(uint8_t channel, uint16_t *out)
+{
+    uint8_t buf[2];
+    struct timespec t0;
+    int ready;
+
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    for (;;) {
+        ready = ad7705_data_ready(channel);
+        if (ready < 0) return -1;
+        if (ready) break;
+        if (elapsed_us_since(&t0) / 1000 > AD7705_DRDY_TIMEOUT_MS) return -1;
+        usleep(5000);
+    }
+
+    if (ad7705_write(AD7705_REG_DATA | AD7705_READ_BIT | channel) < 0) return -1;
+    if (ad7705_read(buf, 2) < 0) return -1;
+
+    *out = ((uint16_t)buf[0] << 8) | buf[1];
+    return 0;
 }
 
 static int read_temperature(float *out)
 {
-    int adc = read_mcp3008(MCP3008_LM35_CHANNEL);
-    if (adc < 0) {
+    uint16_t adc;
+    float voltage;
+
+    if (ad7705_read_data(AD7705_CH1, &adc) < 0) {
         return -1;
     }
 
-    float voltage = (adc * MCP3008_VREF) / 1023.0f;
+    voltage = ((float)adc / 65535.0f) * AD7705_VREF;
     *out = voltage * 100.0f;
     return 0;
 }
@@ -288,7 +366,14 @@ int sensors_hw_init(void)
     printf("[SENSORS] libgpiod indisponivel; HC-SR04 em simulacao\n");
 #endif
 
-    if (spi_init() != 0) {
+    if (spi_init() == 0) {
+        if (ad7705_reset() < 0 ||
+            ad7705_init_channel(AD7705_CH1) < 0) {
+            fprintf(stderr, "[SENSORS] falha inicializando AD7705\n");
+        } else {
+            printf("[SENSORS] AD7705 inicializado (canal 1, self-cal OK)\n");
+        }
+    } else {
         fprintf(stderr, "[SENSORS] SPI indisponivel; LM35 em simulacao\n");
     }
 
