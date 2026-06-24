@@ -201,9 +201,24 @@ static mqtt_cmd_type_t parse_cmd_name(const char *cmd)
     if (strcmp(cmd, "RESET_FSM") == 0) {
         return MQTT_CMD_RESET_FSM;
     }
+    if (strcmp(cmd, "INJECT_SENSOR_FAULT") == 0) {
+        return MQTT_CMD_INJECT_SENSOR_FAULT;
+    }
+    if (strcmp(cmd, "FREEZE_SENSORS") == 0) {
+        return MQTT_CMD_FREEZE_SENSORS;
+    }
+    if (strcmp(cmd, "UNFREEZE_ALL") == 0) {
+        return MQTT_CMD_UNFREEZE_ALL;
+    }
+    if (strcmp(cmd, "GENERATE_LOG_STORM") == 0) {
+        return MQTT_CMD_GENERATE_LOG_STORM;
+    }
 
     return MQTT_CMD_INVALID;
 }
+
+#define PARSE_ERR_MALFORMED -1
+#define PARSE_ERR_MISSING_FIELDS -2
 
 static int parse_command_json(const char *payload, mqtt_command_t *out)
 {
@@ -215,7 +230,7 @@ static int parse_command_json(const char *payload, mqtt_command_t *out)
 
     root = cJSON_Parse(payload);
     if (root == NULL) {
-        return -1;
+        return PARSE_ERR_MALFORMED;
     }
 
     cmd_id = cJSON_GetObjectItemCaseSensitive(root, "cmd_id");
@@ -228,7 +243,7 @@ static int parse_command_json(const char *payload, mqtt_command_t *out)
         !cJSON_IsNumber(value) ||
         !cJSON_IsNumber(deadline_ms)) {
         cJSON_Delete(root);
-        return -1;
+        return PARSE_ERR_MISSING_FIELDS;
     }
 
     memset(out, 0, sizeof(*out));
@@ -338,10 +353,25 @@ static int actuator_value_is_valid(const mqtt_command_t *cmd)
     }
 }
 
+#define MIN_VIABLE_DEADLINE_MS 5
+
 static int deadline_missed(const mqtt_command_t *cmd)
 {
-    return cmd->deadline_ms > 0 &&
-           elapsed_ms_since(&cmd->received_at) > cmd->deadline_ms;
+    struct timespec now;
+    long elapsed_us;
+
+    if (cmd->deadline_ms <= 0) {
+        return 0;
+    }
+
+    if (cmd->deadline_ms < MIN_VIABLE_DEADLINE_MS) {
+        return 1;
+    }
+
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    elapsed_us = (now.tv_sec - cmd->received_at.tv_sec) * 1000000L +
+                 (now.tv_nsec - cmd->received_at.tv_nsec) / 1000L;
+    return elapsed_us > ((long)cmd->deadline_ms * 1000L);
 }
 
 static void handle_command(mqtt_context_t *ctx, const mqtt_command_t *cmd)
@@ -351,12 +381,22 @@ static void handle_command(mqtt_context_t *ctx, const mqtt_command_t *cmd)
 
     if (cmd->type == MQTT_CMD_INVALID) {
         mqtt_metric_inc(ctx, &ctx->invalid_cmd_count);
+        atuadores_log(ctx->atuadores, "MQTT",
+                      "comando desconhecido recebido cmd_id=%d (invalid_cmd)",
+                      cmd->cmd_id);
         mqtt_publish_ack(ctx, cmd->cmd_id, "INVALID_CMD",
                          elapsed_ms_since(&cmd->received_at));
         return;
     }
 
     if (deadline_missed(cmd)) {
+        pthread_mutex_lock(&ctx->atuadores->metrics_mutex);
+        ctx->atuadores->metrics.deadlines_missed++;
+        pthread_mutex_unlock(&ctx->atuadores->metrics_mutex);
+        atuadores_log(ctx->atuadores, "DEADLINE",
+                      "deadline_ms=%d excedido para cmd_id=%d",
+                      cmd->deadline_ms, cmd->cmd_id);
+        atuadores_post_event(ctx->atuadores, FSM_EVT_DEADLINE_MISSED);
         mqtt_publish_ack(ctx, cmd->cmd_id, "DEADLINE_MISSED",
                          elapsed_ms_since(&cmd->received_at));
         return;
@@ -407,6 +447,59 @@ static void handle_command(mqtt_context_t *ctx, const mqtt_command_t *cmd)
                          status_from_enqueue(enqueue_status),
                          latency_ms);
         break;
+
+    case MQTT_CMD_INJECT_SENSOR_FAULT:
+        pthread_mutex_lock(&ctx->atuadores->state_mutex);
+        ctx->atuadores->sensor_fault_injected = (cmd->value != 0);
+        pthread_mutex_unlock(&ctx->atuadores->state_mutex);
+        atuadores_log(ctx->atuadores, "SENSOR_FAULT",
+                      cmd->value
+                          ? "INJECT_SENSOR_FAULT: falha simulada ATIVADA"
+                          : "INJECT_SENSOR_FAULT: falha REMOVIDA");
+        if (cmd->value) {
+            atuadores_post_event(ctx->atuadores, FSM_EVT_FAULT_INJECTED);
+        }
+        mqtt_publish_ack(ctx, cmd->cmd_id, "OK",
+                         elapsed_ms_since(&cmd->received_at));
+        break;
+
+    case MQTT_CMD_FREEZE_SENSORS:
+        pthread_mutex_lock(&ctx->atuadores->state_mutex);
+        ctx->atuadores->freeze_active = (cmd->value != 0);
+        pthread_mutex_unlock(&ctx->atuadores->state_mutex);
+        atuadores_log(ctx->atuadores, "FREEZE",
+                      cmd->value
+                          ? "FREEZE_SENSORS: heartbeat/sensors congelados"
+                          : "FREEZE_SENSORS: liberado");
+        mqtt_publish_ack(ctx, cmd->cmd_id, "OK",
+                         elapsed_ms_since(&cmd->received_at));
+        break;
+
+    case MQTT_CMD_UNFREEZE_ALL:
+        pthread_mutex_lock(&ctx->atuadores->state_mutex);
+        ctx->atuadores->freeze_active = 0;
+        ctx->atuadores->sensor_fault_injected = 0;
+        pthread_mutex_unlock(&ctx->atuadores->state_mutex);
+        atuadores_log(ctx->atuadores, "UNFREEZE",
+                      "todos os congelamentos e falhas removidos");
+        mqtt_publish_ack(ctx, cmd->cmd_id, "OK",
+                         elapsed_ms_since(&cmd->received_at));
+        break;
+
+    case MQTT_CMD_GENERATE_LOG_STORM: {
+        int n = cmd->value > 0 ? cmd->value : 1;
+        int max_logs = 200;
+        int i;
+        if (n > max_logs) n = max_logs;
+        for (i = 0; i < n; i++) {
+            atuadores_log(ctx->atuadores, "LOG_STORM",
+                          "storm log %d/%d (cmd_id=%d)",
+                          i + 1, n, cmd->cmd_id);
+        }
+        mqtt_publish_ack(ctx, cmd->cmd_id, "OK",
+                         elapsed_ms_since(&cmd->received_at));
+        break;
+    }
 
     case MQTT_CMD_INVALID:
     default:
@@ -462,11 +555,22 @@ static void on_message(struct mosquitto *mosq,
     mqtt_metric_inc(ctx, &ctx->mqtt_rx_count);
     atuadores_post_event(ctx->atuadores, FSM_EVT_MQTT_RX);
 
-    if (parse_command_json(payload, &cmd) != 0) {
-        mqtt_metric_inc(ctx, &ctx->invalid_json_count);
-        atuadores_log(ctx->atuadores, "MQTT_RX", "JSON invalido recebido");
-        free(payload);
-        return;
+    {
+        int parse_rc = parse_command_json(payload, &cmd);
+        if (parse_rc == PARSE_ERR_MALFORMED) {
+            mqtt_metric_inc(ctx, &ctx->invalid_json_count);
+            atuadores_log(ctx->atuadores, "MQTT_RX",
+                          "JSON malformado recebido (invalid_json)");
+            free(payload);
+            return;
+        }
+        if (parse_rc == PARSE_ERR_MISSING_FIELDS) {
+            mqtt_metric_inc(ctx, &ctx->invalid_json_count);
+            atuadores_log(ctx->atuadores, "MQTT_RX",
+                          "campos ausentes no JSON (missing_fields)");
+            free(payload);
+            return;
+        }
     }
 
     if (mqtt_command_enqueue(ctx, &cmd) != 0) {
@@ -644,6 +748,7 @@ void *thread_publisher(void *arg)
         }
         if (ctx->client != NULL && ctx->connected) {
             mqtt_publish_state(ctx);
+            mqtt_publish_metrics(ctx);
         }
     }
 

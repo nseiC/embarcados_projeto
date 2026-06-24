@@ -449,19 +449,35 @@ void *thread_sensors(void *arg)
     while (ctx->running) {
         float temperature_c = 0.0f;
         float distance_cm = 0.0f;
-        int temperature_ok = (read_temperature(&temperature_c) == 0);
-        int distance_ok = (read_distance(&distance_cm) == 0);
+        int temperature_ok = 0;
+        int distance_ok = 0;
+        int fault, frozen;
 
-        pthread_mutex_lock(&ctx->sensors_mutex);
-        if (temperature_ok) {
-            ctx->sensors.temperature_c = temperature_c;
-            ctx->sensors.temperature_valid = 1;
+        pthread_mutex_lock(&ctx->state_mutex);
+        fault = ctx->sensor_fault_injected;
+        frozen = ctx->freeze_active;
+        pthread_mutex_unlock(&ctx->state_mutex);
+
+        if (fault) {
+            pthread_mutex_lock(&ctx->sensors_mutex);
+            ctx->sensors.temperature_valid = 0;
+            ctx->sensors.distance_valid = 0;
+            pthread_mutex_unlock(&ctx->sensors_mutex);
+        } else if (!frozen) {
+            temperature_ok = (read_temperature(&temperature_c) == 0);
+            distance_ok = (read_distance(&distance_cm) == 0);
+
+            pthread_mutex_lock(&ctx->sensors_mutex);
+            if (temperature_ok) {
+                ctx->sensors.temperature_c = temperature_c;
+                ctx->sensors.temperature_valid = 1;
+            }
+            if (distance_ok) {
+                ctx->sensors.distance_cm = distance_cm;
+                ctx->sensors.distance_valid = 1;
+            }
+            pthread_mutex_unlock(&ctx->sensors_mutex);
         }
-        if (distance_ok) {
-            ctx->sensors.distance_cm = distance_cm;
-            ctx->sensors.distance_valid = 1;
-        }
-        pthread_mutex_unlock(&ctx->sensors_mutex);
 
         nanosleep(&period, NULL);
     }

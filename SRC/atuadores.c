@@ -125,6 +125,12 @@ void atuadores_context_init(atuadores_context_t *ctx)
     ctx->state.servo_deg = 90;
     ctx->state.fsm_state = FSM_INIT;
     ctx->running = 1;
+    ctx->sensor_fault_injected = 0;
+    ctx->freeze_active = 0;
+    ctx->sensors.temperature_c = 25.0f;
+    ctx->sensors.distance_cm = 30.0f;
+    ctx->sensors.temperature_valid = 1;
+    ctx->sensors.distance_valid = 1;
     now_monotonic(&ctx->actuator_heartbeat);
 }
 
@@ -628,12 +634,17 @@ const char *fsm_event_to_string(fsm_event_t evt)
     case FSM_EVT_CMD_ERROR:        return "CMD_ERROR";
     case FSM_EVT_DEADLINE_MISSED:  return "DEADLINE_MISSED";
     case FSM_EVT_RESET_REQUESTED:  return "RESET_REQUESTED";
+    case FSM_EVT_FAULT_INJECTED:   return "FAULT_INJECTED";
     default:                       return "UNKNOWN";
     }
 }
 
 static fsm_state_t fsm_next_state(fsm_state_t current, fsm_event_t evt)
 {
+    if (evt == FSM_EVT_FAULT_INJECTED && current != FSM_INIT) {
+        return FSM_ERROR;
+    }
+
     switch (current) {
     case FSM_INIT:
         if (evt == FSM_EVT_INIT_DONE)   return FSM_IDLE;
@@ -678,6 +689,8 @@ static fsm_state_t fsm_next_state(fsm_state_t current, fsm_event_t evt)
     return current;
 }
 
+#define RECOVERY_DURATION_TICKS 12
+
 void *thread_fsm_update(void *arg)
 {
     atuadores_context_t *ctx = (atuadores_context_t *)arg;
@@ -685,6 +698,8 @@ void *thread_fsm_update(void *arg)
         .tv_sec = FSM_TICK_MS / 1000,
         .tv_nsec = (long)(FSM_TICK_MS % 1000) * 1000000L,
     };
+    int recovery_ticks_remaining = 0;
+    fsm_state_t prev_state = FSM_INIT;
 
     if (ctx == NULL) {
         return NULL;
@@ -714,17 +729,46 @@ void *thread_fsm_update(void *arg)
                        fsm_state_to_string(current),
                        fsm_event_to_string(evt),
                        fsm_state_to_string(next));
+                atuadores_log(ctx, "FSM", "%s -> %s via %s",
+                              fsm_state_to_string(current),
+                              fsm_state_to_string(next),
+                              fsm_event_to_string(evt));
+                if (next == FSM_PROCESSING_COMMAND) {
+                    atuadores_log(ctx, "FSM", "PROCESSING_COMMAND ativo");
+                } else if (next == FSM_ACTUATING) {
+                    atuadores_log(ctx, "FSM", "ACTUATING ativo");
+                }
             }
         }
 
         current = read_fsm_state(ctx);
+
+        if (current == FSM_RECOVERY && prev_state != FSM_RECOVERY) {
+            recovery_ticks_remaining = RECOVERY_DURATION_TICKS;
+            atuadores_log(ctx, "RECOVERY",
+                          "iniciando recuperacao (~%dms)",
+                          RECOVERY_DURATION_TICKS * FSM_TICK_MS);
+        }
+
         if (current == FSM_TIMEOUT) {
             set_fsm_state(ctx, FSM_RECOVERY);
             printf("[FSM] TIMEOUT --(tick)--> RECOVERY\n");
+            atuadores_log(ctx, "FSM", "TIMEOUT -> RECOVERY (auto)");
+            recovery_ticks_remaining = RECOVERY_DURATION_TICKS;
+            current = FSM_RECOVERY;
         } else if (current == FSM_RECOVERY) {
-            set_fsm_state(ctx, FSM_IDLE);
-            printf("[FSM] RECOVERY --(tick)--> IDLE\n");
+            if (recovery_ticks_remaining > 0) {
+                recovery_ticks_remaining--;
+            } else {
+                set_fsm_state(ctx, FSM_IDLE);
+                printf("[FSM] RECOVERY --(tick)--> IDLE\n");
+                atuadores_log(ctx, "RECOVERY",
+                              "sistema restaurado, RECOVERY -> IDLE");
+                current = FSM_IDLE;
+            }
         }
+
+        prev_state = current;
     }
 
     printf("[FSM_UPDATE] orquestrador encerrado\n");
@@ -807,8 +851,15 @@ void *thread_atuadores(void *arg)
 
     while (queue_pop(ctx, &cmd)) {
         atuador_status_t status = ATUADOR_STATUS_OK;
+        int frozen;
 
-        update_heartbeat(ctx);
+        pthread_mutex_lock(&ctx->state_mutex);
+        frozen = ctx->freeze_active;
+        pthread_mutex_unlock(&ctx->state_mutex);
+
+        if (!frozen) {
+            update_heartbeat(ctx);
+        }
 
         if (cmd.type == ATUADOR_CMD_STOP) {
             pthread_mutex_lock(&ctx->queue.mutex);

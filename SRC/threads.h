@@ -34,7 +34,8 @@ typedef enum {
     FSM_EVT_CMD_INVALID,
     FSM_EVT_CMD_ERROR,
     FSM_EVT_DEADLINE_MISSED,
-    FSM_EVT_RESET_REQUESTED
+    FSM_EVT_RESET_REQUESTED,
+    FSM_EVT_FAULT_INJECTED
 } fsm_event_t;
 
 typedef enum {
@@ -125,6 +126,8 @@ typedef struct {
     pthread_mutex_t sensors_mutex;
     struct timespec actuator_heartbeat;
     int running;
+    int sensor_fault_injected;
+    int freeze_active;
     fsm_event_queue_t fsm_events;
     log_queue_t log_queue;
 } atuadores_context_t;
