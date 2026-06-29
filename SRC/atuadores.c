@@ -621,6 +621,13 @@ static fsm_state_t read_fsm_state(atuadores_context_t *ctx)
     return state;
 }
 
+static int fsm_blocks_actuators(fsm_state_t state)
+{
+    return state == FSM_TIMEOUT ||
+           state == FSM_ERROR ||
+           state == FSM_RECOVERY;
+}
+
 const char *fsm_event_to_string(fsm_event_t evt)
 {
     switch (evt) {
@@ -871,6 +878,18 @@ void *thread_atuadores(void *arg)
 
         metrics_inc(&ctx->metrics_mutex, &ctx->metrics.total_cmds);
         atuadores_post_event(ctx, FSM_EVT_CMD_DEQUEUED);
+
+        {
+            fsm_state_t current_state = read_fsm_state(ctx);
+            if (fsm_blocks_actuators(current_state)) {
+                atuadores_log(ctx, "ATUADORES",
+                              "comando cmd_id=%d bloqueado em estado %s",
+                              cmd.cmd_id,
+                              fsm_state_to_string(current_state));
+                atuadores_post_event(ctx, FSM_EVT_CMD_ERROR);
+                continue;
+            }
+        }
 
         printf("[FSM] PROCESSING_COMMAND: cmd_id=%d type=%d value=%d deadline=%dms\n",
                cmd.cmd_id, (int)cmd.type, cmd.value, cmd.deadline_ms);

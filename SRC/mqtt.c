@@ -353,6 +353,32 @@ static int actuator_value_is_valid(const mqtt_command_t *cmd)
     }
 }
 
+static int command_is_actuator(const mqtt_command_t *cmd)
+{
+    return cmd != NULL &&
+           (cmd->type == MQTT_CMD_SET_LED ||
+            cmd->type == MQTT_CMD_SET_RELAY ||
+            cmd->type == MQTT_CMD_SET_SERVO);
+}
+
+static fsm_state_t current_fsm_state(mqtt_context_t *ctx)
+{
+    fsm_state_t state;
+
+    pthread_mutex_lock(&ctx->atuadores->state_mutex);
+    state = ctx->atuadores->state.fsm_state;
+    pthread_mutex_unlock(&ctx->atuadores->state_mutex);
+
+    return state;
+}
+
+static int fsm_blocks_actuators(fsm_state_t state)
+{
+    return state == FSM_TIMEOUT ||
+           state == FSM_ERROR ||
+           state == FSM_RECOVERY;
+}
+
 #define MIN_VIABLE_DEADLINE_MS 5
 
 static int deadline_missed(const mqtt_command_t *cmd)
@@ -378,6 +404,7 @@ static void handle_command(mqtt_context_t *ctx, const mqtt_command_t *cmd)
 {
     atuador_status_t enqueue_status;
     long latency_ms;
+    fsm_state_t fsm_state;
 
     if (cmd->type == MQTT_CMD_INVALID) {
         mqtt_metric_inc(ctx, &ctx->invalid_cmd_count);
@@ -385,6 +412,17 @@ static void handle_command(mqtt_context_t *ctx, const mqtt_command_t *cmd)
                       "comando desconhecido recebido cmd_id=%d (invalid_cmd)",
                       cmd->cmd_id);
         mqtt_publish_ack(ctx, cmd->cmd_id, "INVALID_CMD",
+                         elapsed_ms_since(&cmd->received_at));
+        return;
+    }
+
+    fsm_state = current_fsm_state(ctx);
+    if (command_is_actuator(cmd) && fsm_blocks_actuators(fsm_state)) {
+        atuadores_log(ctx->atuadores, "MQTT",
+                      "atuador bloqueado em estado %s cmd_id=%d",
+                      fsm_state_to_string(fsm_state),
+                      cmd->cmd_id);
+        mqtt_publish_ack(ctx, cmd->cmd_id, "FSM_BLOCKED",
                          elapsed_ms_since(&cmd->received_at));
         return;
     }
