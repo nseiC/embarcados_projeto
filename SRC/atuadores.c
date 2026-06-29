@@ -621,6 +621,14 @@ static fsm_state_t read_fsm_state(atuadores_context_t *ctx)
     return state;
 }
 
+static void clear_recovery_inhibits(atuadores_context_t *ctx)
+{
+    pthread_mutex_lock(&ctx->state_mutex);
+    ctx->sensor_fault_injected = 0;
+    ctx->freeze_active = 0;
+    pthread_mutex_unlock(&ctx->state_mutex);
+}
+
 static int fsm_blocks_actuators(fsm_state_t state)
 {
     return state == FSM_TIMEOUT ||
@@ -752,8 +760,9 @@ void *thread_fsm_update(void *arg)
 
         if (current == FSM_RECOVERY && prev_state != FSM_RECOVERY) {
             recovery_ticks_remaining = RECOVERY_DURATION_TICKS;
+            clear_recovery_inhibits(ctx);
             atuadores_log(ctx, "RECOVERY",
-                          "iniciando recuperacao (~%dms)",
+                          "iniciando recuperacao (~%dms), sensores liberados",
                           RECOVERY_DURATION_TICKS * FSM_TICK_MS);
         }
 
@@ -762,6 +771,7 @@ void *thread_fsm_update(void *arg)
             printf("[FSM] TIMEOUT --(tick)--> RECOVERY\n");
             atuadores_log(ctx, "FSM", "TIMEOUT -> RECOVERY (auto)");
             recovery_ticks_remaining = RECOVERY_DURATION_TICKS;
+            clear_recovery_inhibits(ctx);
             current = FSM_RECOVERY;
         } else if (current == FSM_RECOVERY) {
             if (recovery_ticks_remaining > 0) {
